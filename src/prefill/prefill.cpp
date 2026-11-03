@@ -4317,6 +4317,12 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 m.g->n_expert, stream_all, !stream_all || seq_start[(size_t) l] == seq_start[(size_t) l + 1]))
                             detail::mmq_resident_sort_rows(ids_h, T * K, (int32_t) K, m.cnt, m.off, order, slot_h, src_h,
                                                            detail::mmq_resident_sort_span(order.size(), MMQ_GROUP, sort_full));
+                        n_order = order.size();
+                        }
+                        // The routing tables go up for every layer that reads them, the compact walk included: slot_h is
+                        // built above for both walks, but the upload used to sit inside the non-compact branch only, so a
+                        // compact layer's MMQ quantize_scatter wrote through whatever slot_dev held (prompts past the
+                        // compact walk's chunk floor crashed with an illegal memory access on sm_70).
                         if (grp_mapped) {
                             copy_i32(m.slot_dev, m.grp_dev + m.grp_tk, T * K, m.cs);
                             copy_i32(m.src_dev, m.grp_dev + 2 * m.grp_tk, T * K, m.cs);
@@ -4343,8 +4349,6 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 std::fwrite(ids_h, sizeof(int32_t), (size_t) (T * K), f);
                                 std::fclose(f);
                             }
-                        }
-                        n_order = order.size();
                         }
 
                         // set_cpu_pool: the CPU experts' activation rows.  Only the rows those experts read cross
