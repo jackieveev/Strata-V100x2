@@ -17,6 +17,38 @@ Strata is an open-source local runtime for [Qwen3.8-Flash-Next](https://huggingf
 
 Support for V100 does not imply that every upstream feature or every other GPU configuration has been tested on V100. Check the relevant code, release notes, and measurement reports before relying on a hardware-specific feature.
 
+## Selected upstream v0.2.11 performance ports — 5 November 2026
+
+This update selectively ports upstream optimizations; it is not a full
+v0.2.11 merge. It adds faster trellis expert kernels, smaller prompt scratch
+buffers, fewer PLE disk-reader allocations, and a Linux CPU/CUDA zero-spin
+fix. The engine version remains 0.1.45.6.
+
+**Measured on this fork's dual-V100 machine:** two V100-PCIE-16GB cards at
+175 W (GPU0 Gen3 x4, GPU1 x16), Ryzen 5 3600, and Gyro-M abliterated Huihui
+TQ2_0. The profile used split 16, two pipeline windows, MTP 4, int8 KV,
+and 524,288-token context with YaRN 2.
+
+| Prompt tokens | Control prompt time | Group scratch + WMMA off |
+| ---: | ---: | ---: |
+| 2,048 | 2,360.8 ms | 2,214.3 ms |
+| 8,192 | 6,932.7 ms | 6,541.0 ms |
+| 32,768 | 18,008.6 ms | 17,636.7 ms |
+
+These are means from cold, interleaved A-B-A-B runs, four requests per size
+and arm. Both arms already included the trellis, HC and PLE ports. This is
+not a measured gain at every context size or a whole-request speed guarantee.
+
+The measured opt-in combination is `STRATA_TQ_SUB8=1 STRATA_EXPERT_PAIR=0
+STRATA_PF_HC_REGION=1 STRATA_PF_GROUP_SCRATCH=1 STRATA_PF_WMMA=0`.
+Group scratch can change floating-point rounding. The PLE allocation change
+needs no flag. The zero-spin fix applies at `STRATA_POOL_SPIN_US=0`; it does
+not establish a saving at the daily setting of 100.
+
+See the [V100 port report](docs/NVIDIA_V100.md#selected-upstream-0211-ports-gyro-m-2026-11-05)
+for individual measurements, option guards, numerical checks, build limits,
+and tested candidates that were not retained. No service defaults are changed.
+
 ## Selected upstream sync — 19 October 2026
 
 This branch imports shared CUDA engine and server changes from upstream
