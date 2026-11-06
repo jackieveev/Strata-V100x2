@@ -3488,6 +3488,8 @@ bool env_on(const char* name) {
 // STRATA_OLD_IQ_MMVQ=1 keeps the per-column kernels (bitwise equal to the new ones; kept for A/B timing)
 bool g_old_kernels = env_on("STRATA_OLD_IQ_MMVQ");
 bool g_no_sub16_gu = env_on("STRATA_NO_SUB16_GU");
+// Opt-in until measured on the deployment hardware; keep the fork's original trellis launches otherwise.
+bool g_tq_sub8 = env_on("STRATA_TQ_SUB8");
 // STRATA_IQ_STAGE_GRID=0 disables staging 64-bit i-quant codebook tables into shared memory
 bool g_stage_grid = [] {
     const char* v = std::getenv("STRATA_IQ_STAGE_GRID");
@@ -4237,11 +4239,11 @@ template<int TG>
 void launch_gu(int64_t cap_groups, cudaStream_t s, const unsigned long long* grp_ptr, const int32_t* grp_start,
                const int32_t* n_groups, const int32_t* ent_tok, const block_q8_1* X, const NativeExpertLayout& L,
                float* gate, float* up) {
-    // the sub-16 rows (row_dot_80_sub16) assume 80 dots per row: (n_embd / qk) * ipb == 80. The APR trellis types
-    // (qk 128, ipb 8: 160 dots at n_embd 2560) take the full-warp multi kernel, as before the sub-16 kernels.
+    // Ordinary sub-16 rows require 80 dots; APR trellis rows require 160 and use eight lanes per row.
+    // Other row lengths keep the full-warp kernel.
     constexpr bool tq = (TG == 144 || TG == 145);
     const bool g_no_sub16_gu = ::strata::kernels::g_no_sub16_gu || (!tq && (L.n_embd / Fmt<TG>::qk) * Fmt<TG>::ipb != 80) ||
-                               (tq && (L.n_embd / Fmt<TG>::qk) * Fmt<TG>::ipb != 160);
+                               (tq && (!g_tq_sub8 || (L.n_embd / Fmt<TG>::qk) * Fmt<TG>::ipb != 160));
     dim3 grid((unsigned) ((2 * L.n_ff + GU_ROWS - 1) / GU_ROWS), (unsigned) cap_groups);
     if (tq && !g_no_sub16_gu && !g_old_kernels && !split_off<TG>() && !g_pair_kernels)
         grid.x = (unsigned) ((2 * L.n_ff + 31) / 32);
@@ -4251,7 +4253,7 @@ void launch_gu(int64_t cap_groups, cudaStream_t s, const unsigned long long* grp
         const dim3 pair_grid((unsigned) ((L.n_ff + 7) / 8), (unsigned) cap_groups);   // a warp per (gate, up) pair
         native_gu_pair_kernel<TG><<<pair_grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
     } else if constexpr (kStageIqGrid<TG>) {
-        if (!g_stage_grid || ((TG == 18 || TG == 21) && !stage_tables_on())) {
+        if (!g_stage_grid || (tq && !g_tq_sub8) || ((TG == 18 || TG == 21) && !stage_tables_on())) {
             if (g_no_sub16_gu) native_gu_multi_kernel<TG, false, false><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
             else native_gu_multi_kernel<TG, false, true><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
             return;
@@ -4326,12 +4328,13 @@ void launch_down(int64_t cap_groups, cudaStream_t s, const unsigned long long* g
         const dim3 pair_grid((unsigned) ((L.n_embd + 15) / 16), (unsigned) cap_groups);
         native_down_pair_kernel<TD><<<pair_grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
     } else {
-        const int rows = (L.n_ff == 640 && !g_no_sub16_gu)
+        const bool sub_down = !g_no_sub16_gu && ((TD != 144 && TD != 146) || g_tq_sub8);
+        const int rows = (L.n_ff == 640 && sub_down)
                              ? ((TD == 20 || TD == 144 || TD == 146) ? 32 : (TD == 42 ? 16 : 8)) : 8;
         const dim3 grid((unsigned) ((L.n_embd + rows - 1) / rows), (unsigned) cap_groups);
         if constexpr (TD == 144 || TD == 146) {
-            if (g_no_sub16_gu) {
-                if (g_stage_grid) native_down_multi_kernel<TD, false, true><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
+            if (!sub_down) {
+                if (g_stage_grid && g_tq_sub8) native_down_multi_kernel<TD, false, true><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
                 else native_down_multi_kernel<TD, false, false><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
             } else {
                 if (g_stage_grid) native_down_multi_kernel<TD, true, true><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);

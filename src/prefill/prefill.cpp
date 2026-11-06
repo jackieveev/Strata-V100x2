@@ -1474,6 +1474,34 @@ uint64_t moe_set_bytes(size_t T, int64_t n_expert, bool fused, bool compact) {
     }
     return a.used;
 }
+// STRATA_PF_HC_REGION=1 (opt-in): the hyper-connection read's scratch (lo, lo16, gated, xn16 where it can move, and the
+// BF16x2 low halves) in the region the attention half and the MoE half share, as a fourth set: a half's read is done
+// with it before that half's set is written, and the fused write at a half's end (gr_write_norm_rs /
+// gr_write_cvec_norm_rs: the next half's xn16) runs after the half's last region reader on the same stream.  The same
+// kernels on the same values: the same bits, ~63 KB a token taken outside the region on the non-WMMA plans, so --prefill
+// auto finds a bigger chunk.  Off by default, and off with the unfused hyper-connection path (STRATA_GR_UNFUSED).
+bool pf_hc_region() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_PF_HC_REGION");
+        return v != nullptr && std::atoi(v) != 0;
+    }();
+    return on && !gr_unfused();
+}
+// xn16 (and its BF16x2 low half) cannot join the region on the direct WMMA plan: there `moe_bufs` sizes no H, so
+// `m.H` IS the xn16 alias - read and written by the experts while GU/Dm are written in the same region.  lo, lo16 and
+// gated only live up to gr_mix_r of the half, like the gated image the plan already aliases to the region's start.
+bool hc_region_moves_xn16() { return !wmma_buffers(); }
+// The bytes of the set pf_hc_region moves: lo, lo16 and gated always, xn16 (and the BF16x2 low halves) with the plan.
+uint64_t hc_set_bytes(size_t T, bool f16_io, bool with_xn16) {
+    Alloc a; a.count_only = true; bool ok = true;
+    if (with_xn16) a.take<uint16_t>(T * (D + (hc_pad() ? XN_PAD : 0)), ok);
+    a.take<float>(T * LR, ok); a.take<uint16_t>(T * LR, ok); a.take<float>(T * D, ok);
+    if (bf16x2_hc(f16_io)) {
+        if (with_xn16) a.take<uint16_t>(T * D, ok);
+        a.take<uint16_t>(T * LR, ok);
+    }
+    return a.used;
+}
 }  // namespace
 
 // The first BF16 and the first FP16 GEMM of a process each pay a one-time library / code-object load in hipBLAS (1.2 s and
@@ -1734,17 +1762,24 @@ bool Prefill::carve(size_t T, void* alloc) {
     m.emb = o.take<float>(T * N, ok); m.R = o.take<float>(T * D, ok);
     m.xn = gr_unfused() ? o.take<float>(T * D, ok) : nullptr;   // F-1: not needed (gr_mix_r reads R)
     m.grs = o.take<float>(T * HC, ok);
-    m.xn16 = o.take<uint16_t>(T * (D + (hc_pad() ? XN_PAD : 0)), ok); m.lo = o.take<float>(T * LR, ok); m.lo16 = o.take<uint16_t>(T * LR, ok);
+    // STRATA_PF_HC_REGION: xn16 (except on the direct WMMA plan), lo, lo16 and gated are taken in the shared region below
+    const bool hcr = pf_hc_region();
+    const bool hcr_xn16 = hcr && hc_region_moves_xn16();
+    if (!hcr_xn16) m.xn16 = o.take<uint16_t>(T * (D + (hc_pad() ? XN_PAD : 0)), ok);
+    if (!hcr) { m.lo = o.take<float>(T * LR, ok); m.lo16 = o.take<uint16_t>(T * LR, ok); }
     const bool gated_alias = wmma_buffers();
     // STRATA_PF_WMMA_LEAN: Xs/Hh and the dq ring are not taken (moe_set_bytes / bytes_needed_impl agree)
     const bool lean = wmma_lean();
-    m.gated = gated_alias ? nullptr : o.take<float>(T * D, ok);
+    m.gated = hcr || gated_alias ? nullptr : o.take<float>(T * D, ok);
     m.inj = o.take<float>(T * HC, ok);
     m.mixed = o.take<float>(T * N, ok); m.mixed_bf = o.take<uint16_t>(T * N, ok);
     m.mixed_h = o.take<uint16_t>(T * N, ok);
     // Embedding rows are dead after gr_broadcast on m.cs; subsequent half outputs use the same stream.
     m.bo = m.emb;
-    if (bf16x2_hc(m.f16_io)) { m.xn16_lo = o.take<uint16_t>(T * D, ok); m.lo16_lo = o.take<uint16_t>(T * LR, ok); }
+    if (bf16x2_hc(m.f16_io)) {
+        if (!hcr_xn16) m.xn16_lo = o.take<uint16_t>(T * D, ok);
+        if (!hcr) m.lo16_lo = o.take<uint16_t>(T * LR, ok);
+    }
     if (bf16x2(m.f16_io)) m.mixed_bf_lo = o.take<uint16_t>(T * N, ok);
     m.steps_dev = o.take<int32_t>(T * strata::kernels::kStepCount, ok);
     strata::kernels::QsaShapes s = core::qsa_shapes(g);
@@ -1760,13 +1795,24 @@ bool Prefill::carve(size_t T, void* alloc) {
         const MoeBufs mb = moe_bufs(T, m.g->n_expert, fz, compact);
         const uint64_t region = std::max({gdn_set_bytes(T), qsa_set_bytes(T, m.cap, m.max_blocks, m.sel_batch,
                                                                            m.attn_batch, s),
-                                          moe_set_bytes(T, m.g->n_expert, fz, compact)});
+                                          moe_set_bytes(T, m.g->n_expert, fz, compact),
+                                          hcr ? hc_set_bytes(T, m.f16_io, hcr_xn16) : (uint64_t) 0});
         uint8_t* base = o.take<uint8_t>((size_t) region, ok);
         m.region = base;
+        if (hcr && base != nullptr) {   // STRATA_PF_HC_REGION: the hyper-connection read's set, from the region's start
+            Alloc h;
+            h.base = base; h.cap = region; h.owned = &m.owned;
+            if (hcr_xn16) m.xn16 = h.take<uint16_t>(T * (D + (hc_pad() ? XN_PAD : 0)), ok);
+            m.lo = h.take<float>(T * LR, ok); m.lo16 = h.take<uint16_t>(T * LR, ok); m.gated = h.take<float>(T * D, ok);
+            if (bf16x2_hc(m.f16_io)) {
+                if (hcr_xn16) m.xn16_lo = h.take<uint16_t>(T * D, ok);
+                m.lo16_lo = h.take<uint16_t>(T * LR, ok);
+            }
+        }
         // Mixing consumes the gated image before attention or MoE uses this region on m.cs.
         // Keep live injection coefficients and float mixed inputs outside the reused span.
         static_assert(K * N >= D);
-        if (gated_alias) m.gated = reinterpret_cast<float*>(base);
+        if (gated_alias && !hcr) m.gated = reinterpret_cast<float*>(base);
         m.region_bytes = region;
         Alloc a;
         a.base = base; a.cap = region; a.owned = &m.owned;
@@ -2628,19 +2674,27 @@ uint64_t Prefill::bytes_needed_impl(const core::ModelGeometry& g, const core::Se
     } else {   // STRATA_RING_BYTES=0: 0.1.39's count
         f(T * N); f(T * D); f(T * D);
     }
-    o.take<uint16_t>(T * (D + (hc_pad() ? XN_PAD : 0)), ok); f(T * LR); o.take<uint16_t>(T * LR, ok);
-    if (!wmma_buffers()) f(T * D);   // gated aliases the shared attention/expert region on the WMMA plan
+    // STRATA_PF_HC_REGION: the buffers carve takes in the shared region are counted with it, not here
+    const bool hcr = pf_hc_region();
+    const bool hcr_xn16 = hcr && hc_region_moves_xn16();
+    if (!hcr_xn16) o.take<uint16_t>(T * (D + (hc_pad() ? XN_PAD : 0)), ok);
+    if (!hcr) { f(T * LR); o.take<uint16_t>(T * LR, ok); }
+    if (!wmma_buffers() && !hcr) f(T * D);   // gated aliases the shared attention/expert region on the WMMA plan
     f(T * HC); f(T * N); o.take<uint16_t>(T * N, ok); o.take<uint16_t>(T * N, ok);
     if (!emb_reuse_account()) f(T * N);   // bo: aliases emb in carve; still counted unless STRATA_EMB_REUSE_ACCOUNT=1
     const bool f16_io = prompt_f16();   // the current device's mode (the stage's), as Prefill::init will decide it
-    if (bf16x2_hc(f16_io)) { o.take<uint16_t>(T * D, ok); o.take<uint16_t>(T * LR, ok); }
+    if (bf16x2_hc(f16_io)) {
+        if (!hcr_xn16) o.take<uint16_t>(T * D, ok);
+        if (!hcr) o.take<uint16_t>(T * LR, ok);
+    }
     if (bf16x2(f16_io)) o.take<uint16_t>(T * N, ok);
     o.take<int32_t>(T * strata::kernels::kStepCount, ok);
     strata::kernels::QsaShapes s = core::qsa_shapes(g);
     const int64_t cap = strata::kernels::qsa_selection_width(strata::kernels::kTopkMaxCells, s);
     const int64_t max_blocks = ss.qsa_states[ss.qsa_primary()].max_cells / s.idx_block + 2;
     o.take<uint8_t>((size_t) std::max({gdn_set_bytes(T), qsa_set_bytes(T, cap, max_blocks, 256, 32, s),
-                                       moe_set_bytes(T, g.n_expert, fused_layout(T, src), fp16tc_compact(T, src))}), ok);
+                                       moe_set_bytes(T, g.n_expert, fused_layout(T, src), fp16tc_compact(T, src)),
+                                       hcr ? hc_set_bytes(T, f16_io, hcr_xn16) : (uint64_t) 0}), ok);
     // STRATA_PF_WMMA_LEAN: the dq ring is not taken in `carve` either (one predicate decides both)
     if (!wmma_lean())
         for (int i = 0; i < DQ; ++i) { o.take<uint16_t>(1280 * 2560, ok); o.take<uint16_t>(2560 * 640, ok); }
