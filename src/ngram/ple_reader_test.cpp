@@ -375,20 +375,25 @@ int selftest(const std::string& dir, uint32_t rb) {
             std::vector<uint32_t> bulk(20000);
             for (auto& r : bulk) r = rng() % N;
             check_rows(rd, bulk, N, rb, "bulk");
-            // two tickets in flight at once, collected in reverse order
-            std::vector<uint32_t> a(16), b(16);
-            for (auto& r : a) r = rng() % N;
-            for (auto& r : b) r = rng() % N;
-            std::vector<uint8_t> oa(16 * rb), ob(16 * rb);
-            const auto ta = rd.issue(a.data(), 16, oa.data());
-            const auto tb = rd.issue(b.data(), 16, ob.data());
-            CHECK(rd.collect(tb, err) && rd.collect(ta, err), "two tickets: %s", err.c_str());
-            std::vector<uint8_t> want(rb);
-            for (int i = 0; i < 16; ++i) {
-                expected_row(a[i], rb, want.data());
-                CHECK(!std::memcmp(want.data(), &oa[i * rb], rb), "ticket a row %d", i);
-                expected_row(b[i], rb, want.data());
-                CHECK(!std::memcmp(want.data(), &ob[i * rb], rb), "ticket b row %d", i);
+            // Overlapping tickets stay independent across small/large miss batches and scratch reuse.
+            for (size_t na : {64u, 65u}) {
+                const size_t nb = na == 64 ? 65 : 129;
+                std::vector<uint32_t> a(na), b(nb);
+                for (auto& r : a) r = rng() % N;
+                for (auto& r : b) r = rng() % N;
+                std::vector<uint8_t> oa(na * rb), ob(nb * rb);
+                const auto ta = rd.issue(a.data(), a.size(), oa.data());
+                const auto tb = rd.issue(b.data(), b.size(), ob.data());
+                CHECK(rd.collect(tb, err) && rd.collect(ta, err), "two tickets: %s", err.c_str());
+                std::vector<uint8_t> want(rb);
+                for (size_t i = 0; i < a.size(); ++i) {
+                    expected_row(a[i], rb, want.data());
+                    CHECK(!std::memcmp(want.data(), &oa[i * rb], rb), "ticket a row %zu", i);
+                }
+                for (size_t i = 0; i < b.size(); ++i) {
+                    expected_row(b[i], rb, want.data());
+                    CHECK(!std::memcmp(want.data(), &ob[i * rb], rb), "ticket b row %zu", i);
+                }
             }
             if (cache > 0) CHECK(rd.stats().cache_hits > 0, "the row cache never hit");
             CHECK(rd.cache_size() <= rd.cache_capacity(), "row cache exceeded its bound");
