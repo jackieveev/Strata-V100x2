@@ -745,6 +745,12 @@ void ExpertPool::worker(int id) {
         const auto parked_at = std::chrono::steady_clock::now();
         uint32_t spins = 0;
         const uint64_t um = umwait_cycles();
+        // Zero requests immediate kernel sleep, not 1024 pauses before the first clock check.
+#if defined(STRATA_POOL_SPIN_ZERO)
+        const bool spin_hot = spin_before_sleep_.count() != 0;
+#else
+        const bool spin_hot = true;
+#endif
 #if defined(_MSC_VER) && defined(_M_X64) && !defined(__clang__)   // MSVC proper: clang-cl (the Windows HIP build) has no WAITPKG intrinsics by default
         const uint64_t um_esc = umwait_escalate();
         const uint64_t um_t0 = um != 0 && um_esc != 0 ? __rdtsc() : 0;
@@ -761,7 +767,7 @@ void ExpertPool::worker(int id) {
                 if ((++spins & 15u) != 0) continue;   // each wait is ~um cycles: look at the clock more often
             } else
 #endif
-            {
+            if (spin_hot) {
                 _mm_pause();
                 if ((++spins & 1023u) != 0) continue;
             }

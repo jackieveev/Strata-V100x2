@@ -1512,6 +1512,10 @@ endif()
 add_library(strata_kernels_cpu STATIC src/kernels/cpu/expert.cpp src/kernels/cpu/pool.cpp
             src/kernels/cpu/expert_layout.cpp src/kernels/cpu/q2_avx2.cpp src/kernels/cpu/hadamard.cpp)
 target_include_directories(strata_kernels_cpu PUBLIC include)
+# PR #4625: honor zero spin only on the Linux CPU/CUDA builds measured upstream.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT STRATA_ENABLE_HIP AND NOT STRATA_HIP_GFX906)
+  target_compile_definitions(strata_kernels_cpu PRIVATE STRATA_POOL_SPIN_ZERO=1)
+endif()
 # Plan v0.3 P6: only the kernel files get the AVX-512 / AVX2 flags; the pool and the probe run on any x86-64,
 # and the engine picks the kernels at run time (cpu_avx512_ok).
 if(MSVC)

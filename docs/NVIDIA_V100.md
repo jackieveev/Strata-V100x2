@@ -4,6 +4,213 @@ Strata's ready-made engine and the support matrix start at compute capability 7.
 engine compiled for it, through the experimental build that issue #236 added. It is **community-tested, not part of the
 supported cards**: no ready-made engine is published for it and the numbers below come from one machine.
 
+## Selected upstream 0.2.11 ports: Gyro-M (2026-11-05)
+
+The latest upstream release checked was
+[v0.2.11](https://github.com/Niko1221/Strata/releases/tag/v0.2.11),
+published on November 5. This is a selective port, not a release merge.
+The comparison starts at clean fork commit `4c56f005`, not the installed
+engine or the user's uncommitted changes. The engine version stays 0.1.45.6.
+
+Measured on two Tesla V100-PCIE-16GB cards at 175 W, a Ryzen 5 3600 and
+94 GiB RAM. GPU0 has a PCIe Gen3 x4 link; GPU1 has x16. The model was
+agentionai's Gyro-M abliterated Huihui TQ2_0, revision
+`3c0312355cd203a304fae16e1bf7b72ef0239fbf`, with its v5 Hadamard-folded pack.
+The engine used split 16, two pipeline windows, MTP 4 with minimum probability
+0.70, int8 KV, 524288 context, YaRN 2 and a 750 MiB reserve.
+
+### Retained changes
+
+- [Upstream `5f81c5dc`](https://github.com/Niko1221/Strata/commit/5f81c5dc):
+  stage the trellis codebook in shared memory and use eight-lane rows for
+  trellis gate/up and down products. The fork's pair kernels remain available.
+  Set **both** `STRATA_TQ_SUB8=1` and `STRATA_EXPERT_PAIR=0` to use the new path.
+  With the new switch unset, the previous launches remain in use.
+- [Upstream `3cc47f02`](https://github.com/Niko1221/Strata/commit/3cc47f02):
+  reuse the attention/expert scratch region for the hyper-connection read.
+  Set `STRATA_PF_HC_REGION=1`. It stays off with `STRATA_GR_UNFUSED=1`.
+  The port keeps `xn16` outside the region on the fork's direct WMMA plan,
+  where it also holds the experts' H image. Allocation and size accounting
+  use the same rule. No kernels or arithmetic are replaced by this option.
+- [Upstream PR #4910](https://github.com/Niko1221/Strata/pull/4910):
+  group PLE disk reads with reusable scratch instead of a temporary hash
+  table and per-page vectors. Small batches use the stack; larger scratch
+  grows only on a cache miss. This changes allocation, not row contents.
+- [Upstream `fbf6e1c7`](https://github.com/Niko1221/Strata/commit/fbf6e1c7),
+  from [PR #4039](https://github.com/Niko1221/Strata/pull/4039):
+  reuse group-sized GU/H/Hq buffers on an all-MMQ prompt plan. Set
+  `STRATA_PF_GROUP_SCRATCH=1 STRATA_PF_WMMA=0`, alongside the trellis
+  and HC options above. The daily WMMA override is arithmetically inert
+  on this all-trellis pack but otherwise prevents the smaller allocation.
+  Fallback, direct WMMA, compact, peer and helper plans are guarded;
+  the existing layouts remain in use when the option is off.
+- [Upstream PR #4625](https://github.com/Niko1221/Strata/pull/4625):
+  when `STRATA_POOL_SPIN_US=0`, sleep without first doing 1024 pauses.
+  The build guard enables this only for Linux CPU/CUDA, not HIP or SYCL.
+  This is an optional CPU-cost saving, not a change to the daily value 100.
+
+| Measurement | Before | With the relevant change |
+| --- | ---: | ---: |
+| GPU0 expert call, 24 groups × 2 entries, two 48-layer sweeps | 242.5 µs | 153.3 µs |
+| GPU1, same expert call | 242.1 µs | 154.7 µs |
+| Primary planner's scratch at 8192 prompt tokens | 4.102564 GiB | 3.618622 GiB |
+| Primary cache slots borrowed for that scratch | 3374 | 2976 |
+| Observed long-reply decode median, 2K/8K prompts | 120.2 tok/s | 126.4 tok/s |
+| PLE issue, 131,072 real-model rows, median of three runs | 29.17 ms | 12.11 ms |
+| Issuer-thread allocations for the same PLE batch, median | 255,352 | 124,265 |
+
+The expert timings are GPU-event microbenchmarks, not whole-model speedups.
+The scratch reduction leaves about 496 MiB, or 398 cache slots, unborrowed
+on the primary planner. It does not enlarge the configured context.
+The decode comparison uses six baseline and twelve trellis-option replies
+of at least 500 tokens. Shorter replies and all 32K rows are excluded
+from that median. MTP acceptance, residency
+and full replies varied; the observed 5.2% difference is indicative, not
+a steady service-speed or model-quality guarantee. Trellis-only prefill
+was roughly unchanged. The scratch option's small prefill difference was
+not confirmed with an interleaved repeat, so no prompt-speed gain is claimed.
+
+All 48 model layers were exercised with 1, 2, 4 and 8 entries per group
+on both cards. Four alternate paths matched the original pair-kernel
+output hashes in 1536 cross-path layer comparisons: original multi,
+new binary with the option off, new eight-lane path, and preserved pair
+path. This checks these expert products, not full-request equivalence.
+The table's expert timings are medians from final A-B-A-B repeats on each
+card, with no build overlap; all 48 output hashes matched in every sweep.
+Earlier parity-sweep timings overlapped a host-only build and are not used
+in that table. Whole-engine timing arms did not overlap builds, except
+the explicitly excluded first baseline arm.
+
+The PLE comparison used the model's actual Q8_0 table, with the reader
+cache disabled. Read counts, byte counts and output hashes matched, and
+the rows were checked against direct file reads. These are issuer CPU
+times, not an end-to-end latency claim. Overlapping 64/65- and 65/129-row
+tickets, collected in reverse order, also returned the expected bytes.
+
+The group-scratch confirmation used properly framed, cold chat requests,
+with all other production routing settings retained. These are means from
+two interleaved A-B-A-B pairs, four requests per size and arm. Both arms
+already had the trellis, HC and PLE ports; the candidate also disabled the
+inert WMMA allocation. Builds did not overlap these requests.
+
+| Prompt tokens | Control prompt time | Group scratch + WMMA off |
+| --- | ---: | ---: |
+| 2,048 | 2,360.8 ms | 2,214.3 ms |
+| 8,192 | 6,932.7 ms | 6,541.0 ms |
+| 32,768 | 18,008.6 ms | 17,636.7 ms |
+| Primary scratch at 8192 tokens | 3.618622 GiB | 2.587509 GiB |
+| Primary borrowed cache slots | 2976 | 2128 |
+
+WMMA off alone used 3.129816 GiB and 2574 slots. Group scratch changes
+batch boundaries and can change floating-point rounding; this is not a
+whole-request bitwise-equivalence claim. Correctly framed arithmetic
+returned `17` with the option off, on, and with forced-small group capacity;
+a 32K production-routing smoke also returned `17`. Small and oversized
+capacity overrides were exercised. The NaN diagnostic checks each valid
+range before its scratch is reused, rather than scanning unused rows.
+
+A separate CPU microbenchmark quantized six trellis-activation rows, checked
+their bytes against serial quantization, then left the pool idle for 1 ms.
+Each run did 1000 cycles; these are median process CPU times from three
+interleaved old/new runs. Wall time was about 1.06 seconds in every arm.
+
+| `STRATA_POOL_SPIN_US` | Old loop CPU time | Ported loop CPU time |
+| --- | ---: | ---: |
+| 0 | 139.8 ms | 46.2 ms |
+| 100, daily setting | 580.8 ms | 588.7 ms |
+
+The zero-spin result is a park-cost microbenchmark, not an inference-speed
+claim. It does not show a saving at 100; the daily setting was left alone.
+
+### Recent upstream PRs and rejected experiments
+
+Open PRs created or updated since October 29 were also checked:
+
+- [#4283](https://github.com/Niko1221/Strata/pull/4283), routed prompt
+  streaming, is not covered on Gyro-M by `STRATA_PF_SKIP_UNROUTED`:
+  that older option requires the direct WMMA path, which trellis experts
+  do not take. The first on/off arms were inert. The actual upstream
+  scheduler was then ported and its skipped transfers traced on both
+  stages. Depths 16 and 64 did not improve prompt time; a final framed
+  8K/32K check confirmed the neutral result. The experiment was removed.
+- [#4767](https://github.com/Niko1221/Strata/pull/4767), sm_70 defaults,
+  is already superseded by the fork's larger measured defaults table.
+- [#4549](https://github.com/Niko1221/Strata/pull/4549), last-card draft-head
+  reservation, is already present: the cache budget subtracts
+  `mtp.bind_bytes` on the drafter's stage.
+- [#4928](https://github.com/Niko1221/Strata/pull/4928), long lookup windows,
+  requires the absent long-window verifier/drafter changes and excludes
+  the daily two-window pipeline. It was not hardware-tested or ported.
+- [#5149](https://github.com/Niko1221/Strata/pull/5149), the drafter-prefill
+  deadlock, concerns a stage-0 drafter. This V100 profile keeps its drafter
+  on the last card; stage-0 placement was already measured slower here.
+- [#5119](https://github.com/Niko1221/Strata/pull/5119),
+  [#5158](https://github.com/Niko1221/Strata/pull/5158) and
+  [#5258](https://github.com/Niko1221/Strata/pull/5258) tune the separate
+  all-cards split engine, which this fork does not contain.
+- The release's CPU/PCIe pool-rate rule (`213f1a39`) was ported temporarily
+  and then removed. Matched B-A-B-A confirmation made eight requests per
+  arm: median decode was 128.48 versus 129.09 tok/s. Only five controls,
+  versus eight candidates, reached 500 tokens; the long-only controls
+  were not slower. There was no repeatable gain to retain.
+- MMQ group scratch was initially excluded too broadly. The all-trellis
+  layout is eligible once the inert WMMA allocation is disabled; the
+  measured, guarded port is retained above.
+- The CPU-only part of [#5272](https://github.com/Niko1221/Strata/pull/5272)
+  was tested with actual host-thread pinning and two L3-local work queues.
+  A-B-A prompt timings were within the control spread. It was removed.
+- QSA norm/rope fusion (`14a85eca`) passed kernel parity but did not improve
+  whole-prompt time. Graph priorities (`0049fa73`) and GDN snapshot rings
+  ([#3944](https://github.com/Niko1221/Strata/pull/3944)) had no repeatable
+  whole-engine gain, including framed-chat checks after the initial raw-token
+  screens. Snapshot recovery parity passed; all three experiments were removed.
+- Dual-data-parallel prompt reads
+  ([#5002](https://github.com/Niko1221/Strata/pull/5002)) really activated,
+  but were slower. A final matched, resident-KV 32K chat check took
+  18,749.3 ms with it off and 22,859.2 ms on. This also requires dropping
+  the daily KV-grow setting. It was removed, not installed.
+- WDDM submission optimizations, newer-architecture kernels, and unrelated
+  model engines were not ported. PLE RAM/mmap compaction and copy-stream
+  changes require IQ4_NL; this model's PLE table is Q8_0.
+  No DFlash or rejected Unsloth model was downloaded or restored.
+
+### Verification and reproduction limits
+
+CUDA 12.8 sm_70 and HIP gfx1100 builds of the retained source passed.
+`vram_plan_test`, `arch_defaults_test` and `nv_defaults_test` passed.
+`ple_reader_test --selftest` passed all eight formats and overlapping-ticket
+checks. The CPU pool made 168 bitwise comparisons each for synthetic Q4
+and the real TQ expert at zero spin, and 168 for the real expert at spin 100.
+Final linked CUDA expert sweeps matched all 48 output hashes on both cards,
+including the recorded baseline hashes for layers 0, 16 and 32. Final
+production-routing 32K and zero-spin 2K chat requests each returned exactly
+`17`. These checks used correctly parsed role markers; raw-token probes
+are not counted as chat-format validation.
+
+The optional `native_expert_parity` GGUF float-oracle run **failed** with
+a null call in `check_blob`; this build uses upstream ggml without the
+trellis float-converter traits that checker calls. It is not counted as
+a passing CPU-oracle check. HIP hardware and long-context recall were
+not tested. SYCL was not built: no `icpx` compiler was found in PATH or
+the standard oneAPI locations. No thermal-slowdown samples were reported
+in the retained whole-engine timing arms.
+
+Raw experiment outputs are kept outside the repository. The initial
+cold timing used `bench/run_v100_prefill.py`, targets `2048,8192,32768`,
+two repeats, `--max-new 520` and `--no-settings-strict`. That last switch
+is needed because the old harness expects spec 8, reserve 700 and pair
+kernels, rather than spec 4, reserve 750 and the explicit non-pair candidate.
+Second-pass checks used a temporary protocol harness with the model's chat
+template and `parse_special=True` for role markers; initial unframed probes
+are treated only as raw-token workloads, not as chat-format validation.
+Prompt and conversation caches were
+disabled for cold timing; the model, GPU order and remaining service
+arguments/environment were preserved.
+
+The daily service was restarted with its original installed engine and
+settings; its authenticated HTTP arithmetic smoke returned `17`.
+No candidate engine or new settings were installed into the live service.
+
 ## Build
 
 CUDA 13 dropped Volta, so the build needs a **CUDA 12.x** toolkit (12.8 was used) and a host GCC that toolkit accepts.
