@@ -110,6 +110,8 @@ struct StartupVramInput {
     bool prefill_borrow = false;
     bool prefill_auto = false;
     int64_t prefill_chunk = 0;          ///< the requested explicit chunk (0 = the token path)
+    int64_t primary_own_chunk = 0;      ///< a layer split's first card keeps its OWN prompt buffers for this
+                                        ///< chunk instead of lending its cache tail (0 = borrow, the default)
     bool spec_needs_cache = false;      ///< --spec T: the verify windows read the residency graph, so a
                                         ///  zero-slot cache cannot run the engine the user asked for
 
