@@ -6236,6 +6236,9 @@ int main(int argc, char** argv) {
     // runtime's loans, so the plan and the layout cannot disagree.
     std::vector<int64_t> sized_slots;
     strata::prefill::VramPlan plan;   // outlives the block: the post-touch correction holds the cache to its figure
+    // STRATA_SPLIT_OWN_PRIMARY: the chunk the split's first card keeps its own prompt buffers for (0 = borrow).
+    int64_t split_primary_own_chunk = 0;
+    int64_t split_primary_own_headroom = 0;   // VRAM kept free beside those buffers (STRATA_SPLIT_OWN_HEADROOM_MIB)
     strata::prefill::EffectivePrefillPlan effective_prefill;   // what the FINAL cache actually validated
     bool posttouch_validated = false;
     // the chunk/loan policy's knobs and costs, built once for the startup plan's post-touch correction and the
@@ -6273,6 +6276,45 @@ int main(int argc, char** argv) {
                 mtp_bind += (int64_t) d->bind_bytes(native_head.row_bytes(), n_vocab);
         const int64_t session_b =
             (int64_t) strata::core::session_bytes(g, o.max_context, K, 0, multi_gpu ? split_at[0] : -1);
+        // ---- STRATA_SPLIT_OWN_PRIMARY: A SPLIT'S FIRST CARD KEEPS ITS OWN PROMPT BUFFERS.  Its cache is capped at
+        // its own pair count, so the VRAM that count leaves unused either funds the prompt buffers or is handed back
+        // through a loan that evicts those experts and re-reads them over that card's link on every chunk, then
+        // refills them.  Own them when the cache loses fewer bytes that way than a loan of the same chunk takes.
+        // Opt-in: it changes which experts a full card keeps resident.
+        static const bool own_primary_on = [] {
+            const char* v = std::getenv("STRATA_SPLIT_OWN_PRIMARY");
+            return v != nullptr && v[0] == '1';
+        }();
+        if (own_primary_on && multi_gpu && !o.no_prefill_borrow && !profile.empty()) {
+            const int64_t chunk = o.prefill_auto ? auto_ceiling : o.prefill_chunk;
+            const uint64_t need = strata::prefill::Prefill::bytes_needed(g, ss, chunk, -1) +
+                                  strata::prefill::kOwnedPageMarginBytes;
+            // STRATA_SPLIT_OWN_HEADROOM_MIB: VRAM kept free on that card beside its own buffers, for a lazily loaded
+            // sibling (--vision's projector and scratch) or a workspace.  0 (the default): the measured layout.
+            static const int64_t own_headroom = [] {
+                const char* v = std::getenv("STRATA_SPLIT_OWN_HEADROOM_MIB");
+                const long long mib = v != nullptr ? std::atoll(v) : 0;
+                return (int64_t) std::max<long long>(0, mib) << 20;
+            }();
+            const uint64_t mandatory = ((uint64_t) o.vram_reserve_mib << 20) + (uint64_t) pipe_first +
+                                       (uint64_t) own_headroom;
+            uint64_t pairs = 0;
+            const auto& lay = strata::kernels::cpu::expert_layout();
+            for (const auto& pr : profile)
+                pairs += (uint64_t) strata::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(pr.first));
+            const uint64_t avail = free_b > mandatory ? free_b - mandatory : 0;
+            const uint64_t cache_now = std::min(pairs, avail);
+            const uint64_t cache_own = std::min(pairs, avail > need ? avail - need : 0);
+            const uint64_t loss = cache_now - cache_own;
+            if (chunk > 0 && free_b >= mandatory + need && loss < need) {
+                split_primary_own_chunk = chunk;
+                split_primary_own_headroom = own_headroom;
+                std::fprintf(stderr, "strata generate: split: CUDA0 keeps its own prompt buffers for a %lld-token "
+                                     "chunk (%.2f GiB; its cache gives up %.2f GiB of %.2f, a loan would take %.2f)\n",
+                             (long long) chunk, (double) need / 1073741824.0, (double) loss / 1073741824.0,
+                             (double) pairs / 1073741824.0, (double) need / 1073741824.0);
+            }
+        }
         strata::prefill::StartupVramInput in;
         in.free_bytes = free_b;
         in.user_reserve_bytes = (uint64_t) o.vram_reserve_mib << 20;
@@ -6291,13 +6333,15 @@ int main(int argc, char** argv) {
         in.prefill_borrow = prefill_borrow_available;
         in.prefill_auto = o.prefill_auto;
         in.prefill_chunk = o.prefill_chunk;
+        in.primary_own_chunk = split_primary_own_chunk;
         in.spec_needs_cache = o.spec > 0;
         // the hit-path scratch, the verify windows and the decode graphs stay funded by the reserve by design
         // (--vram-reserve-mib's documented job, #199): the planner does not price them individually, and the
         // post-touch correction keeps an owned prefill from consuming their room.
         // A layer split books its per-stage windows itself (stage_room's kWindowMib); --pipeline-windows' own
         // second verifier and GDN snapshots (pipe_first) are booked here, beside the reserve.
-        in.runtime_reserve_bytes = (uint64_t) pipe_first;
+        in.runtime_reserve_bytes = (uint64_t) pipe_first +
+                                   (uint64_t) (split_primary_own_chunk > 0 ? split_primary_own_headroom : 0);
         in.lend.min_keep_slots = 128;
         in.lend.lend_pct = kAutoLendPct;
         in.lend.auto_ceiling = auto_ceiling;
@@ -8416,7 +8460,7 @@ int main(int argc, char** argv) {
     };
     if (o.resident_cpu_experts) {
         int64_t lend_from = -1;
-        if (o.prefill_chunk > 0 && !o.no_prefill_borrow && d_res != nullptr && xcache.slots() > 0) {
+        if (split_primary_own_chunk == 0 && o.prefill_chunk > 0 && !o.no_prefill_borrow && d_res != nullptr && xcache.slots() > 0) {
             int64_t chunk = o.prefill_chunk;
             const int64_t k = plan_lend(chunk);
             if (k > 0) lend_from = xcache.slots() - k;
@@ -8468,6 +8512,7 @@ int main(int argc, char** argv) {
                 const int64_t le = i == 0 ? split_at[0] : stages[i - 1]->le;
                 if (xc.slots() <= 0 || le <= lb) continue;
                 const uint64_t need = strata::prefill::Prefill::bytes_needed(g, ses, bound);
+                if (i == 0 && split_primary_own_chunk > 0) continue;   // its own buffers: nothing of this cache is lent
                 if (own_ok) {   // the card funds its buffers at any chunk the scan can pick: nothing is lent
                     const strata::core::OnDevice on(dev);
                     size_t fb = 0, tb = 0;
@@ -8812,6 +8857,7 @@ int main(int argc, char** argv) {
             // explicit --prefill is the operator's number, and a loan of it only has to fit.  With one participant
             // (no split) this reduces to plan_lend exactly, so the single-GPU loan is unchanged from main.
             auto fits_one = [&](const PfPart& p, int64_t c, bool cap) -> bool {
+                if (split_primary_own_chunk > 0 && &p == &pf_parts[0]) return true;   // it owns its buffers: no loan
                 const int64_t k = part_slots(p, c);
                 if (k <= 0 || k + 128 > p.cache->slots()) return false;
                 return !(cap && k * 100 > kAutoLendPct * p.cache->slots());
@@ -8842,6 +8888,7 @@ int main(int argc, char** argv) {
                 int64_t room = cap;
                 for (const PfPart& p : pf_parts) {
                     if (only != nullptr && &p != only) continue;
+                    if (split_primary_own_chunk > 0 && &p == &pf_parts[0]) continue;   // its ring is in its own buffers
                     // clamped at 0: a cache under 128 slots has a negative lend budget, and `slots - budget` is
                     // then `slots`, which is off_[slots] - the end of the prefix sum, so that cache lends 0 bytes
                     // rather than reading one entry past its offsets
@@ -8919,6 +8966,7 @@ int main(int argc, char** argv) {
                 uint64_t gc_bytes = 0;
                 int64_t gc_slots = 0;
                 for (const PfPart& p : pf_parts) {
+                    if (split_primary_own_chunk > 0 && &p == &pf_parts[0]) continue;
                     gc_bytes += (uint64_t) std::max<int64_t>(0, (int64_t) p.cache->bytes());
                     gc_slots += p.cache->slots();
                 }
@@ -8928,6 +8976,7 @@ int main(int argc, char** argv) {
                         bytes = 0;
                         slots = 0;
                         for (const PfPart& p : pf_parts) {
+                            if (split_primary_own_chunk > 0 && &p == &pf_parts[0]) continue;
                             const int64_t k = part_slots(p, c);
                             if (k <= 0) continue;
                             slots += k;
@@ -9004,7 +9053,10 @@ int main(int argc, char** argv) {
                         size_t fb = 0, tb = 0;
                         if (cudaMemGetInfo(&fb, &tb) != cudaSuccess) { (void) cudaGetLastError(); continue; }
                         const uint64_t need = strata::prefill::Prefill::bytes_needed(g, *p.ses, chunk, -1, srcp != nullptr);
-                        if ((uint64_t) fb >= need + (3ull << 29)) {
+                        const uint64_t headroom = (split_primary_own_chunk > 0 && &p == &pf_parts[0])
+                                                      ? (uint64_t) strata::prefill::kOwnedPageMarginBytes
+                                                      : (3ull << 29);
+                        if ((uint64_t) fb >= need + headroom) {
                             std::fprintf(stderr, "strata serve:   CUDA%d keeps its own prompt buffers (%.2f GiB of "
                                                  "%.2f GiB free): no loan\n", p.dev < 0 ? 0 : p.dev,
                                          (double) need / 1073741824.0, (double) fb / 1073741824.0);

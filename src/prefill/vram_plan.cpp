@@ -231,7 +231,18 @@ VramPlan plan_startup_vram(const StartupVramInput& in) {
     if (prefill_on && in.prefill_borrow && auto_cache) {
         auto [s0, sized0] = build_cache(cache_budget);
         const CacheLendView v0 = planned_view(s0, sized0, blob, p.sized_offsets);
-        if (in.prefill_auto) {
+        if (in.primary_own_chunk > 0) {
+            // A SPLIT'S FIRST CARD OWNS ITS PROMPT BUFFERS.  Its cache is already capped at its own pair count, so
+            // the VRAM that count leaves unused funds the buffers instead of a loan that evicts and re-reads
+            // resident experts on every chunk.  Booked before the cache is sized, so each allocation is counted once.
+            const uint64_t own = book_owned(in.primary_own_chunk);
+            auto [s1, sized1] = build_cache(cache_budget);
+            slots = s1;
+            sized = std::move(sized1);
+            p.notes.push_back("the split's first card keeps its own prompt buffers for a " +
+                              std::to_string(in.primary_own_chunk) + "-token chunk (" +
+                              std::to_string((long long) (own >> 20)) + " MiB); nothing of its cache is lent");
+        } else if (in.prefill_auto) {
             int64_t ignored = 0;
             p.lend = plan_lend_chunks(v0, in.lend, in.costs, true, ignored);
             if (p.lend.chunk > 0) {

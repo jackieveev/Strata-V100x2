@@ -600,6 +600,31 @@ int main() {
               "R28: the serve guard's passing direction (owned accepted, owned runtime)");
     }
 
+    // ---- Case G (STRATA_SPLIT_OWN_PRIMARY): a split's first card keeps its own prompt buffers from the VRAM its
+    // own pair count leaves unused, giving up fewer cache bytes than a loan of the same chunk would take.
+    {
+        StartupVramInput in = plan_input((uint64_t) 2600 * MIB);
+        in.prefill_borrow = true;
+        in.prefill_auto = true;
+        in.prefill_chunk = 8192;
+        in.profile_pairs = 800;            // 1.6 GiB of pairs: the cache stops there and leaves 300 MiB spare
+        const VramPlan loan = plan_startup_vram(in);
+        check_ok(loan, in.free_bytes, "G: the borrowing control is valid");
+        check(!loan.prefill_owned && loan.lend_slots > 0, "G: the control lends the chunk from the cache");
+        StartupVramInput own = in;
+        own.primary_own_chunk = 8192;
+        const VramPlan p = plan_startup_vram(own);
+        check_ok(p, own.free_bytes, "G: the owning plan is valid");
+        check(p.prefill_owned && p.selected_prefill == 8192 && p.lend_slots == 0,
+              "G: the first card owns its 8192-token buffers and lends nothing");
+        check(p.expert_slots <= loan.expert_slots, "G: owning never grows the cache");
+        const int64_t owned_slots = (int64_t) ((fake_bytes(8192, -1) + ((uint64_t) 64 << 20)) / BLOB);
+        check(loan.expert_slots - p.expert_slots <= owned_slots,
+              "G: the cache gives up no more slots than the buffers take");
+        check(post_cache_required_bytes(p) == p.mandatory_bytes + p.prefill_bytes,
+              "G: the owned buffers are booked beside the cache, exactly once");
+    }
+
     if (fails == 0) std::fprintf(stderr, "vram_plan_test: all checks passed\n");
     return fails == 0 ? 0 : 1;
 }
