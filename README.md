@@ -17,6 +17,40 @@ Strata is an open-source local runtime for [Qwen3.8-Flash-Next](https://huggingf
 
 Support for V100 does not imply that every upstream feature or every other GPU configuration has been tested on V100. Check the relevant code, release notes, and measurement reports before relying on a hardware-specific feature.
 
+## Unsloth Dynamic v3.1 sets (1-4 bit) — 8 November 2026
+
+Resolves [#95](https://github.com/jmnargi/Strata-V100/issues/95): setup's `--family unsloth` menu used to stop at
+UD-IQ4_XS (about 4 bits). It now offers Unsloth's Dynamic v3.1 files as well, from ~1 to ~4 bits, at the revision
+Unsloth published on 2026-11-04 (commit `d9620119`):
+
+| Size | Download | Routed experts | RAM with every expert in RAM | Notes |
+| --- | ---: | ---: | ---: | --- |
+| UD-IQ1_M | 68.0 GB | 32.4 GiB | ~48 GB | the smallest; weakest on careful or long work |
+| UD-Q2_0 | 70.5 GB | 34.8 GiB | ~51 GB | Q2_0 experts, like the fastest 2-bit pack |
+| UD-IQ2_XS | 75.8 GB | 39.4 GiB | ~55 GB | 1 layer with Q5_0 downs |
+| UD-Q2_K_XL | 79.6 GB | 42.8 GiB | ~59 GB | 1 layer with Q5_0 downs |
+| UD-IQ3_XXS | 83.6 GB | 46.8 GiB | ~63 GB | no Q5_0 |
+| UD-Q3_K_XL | 89.5 GB | 52.3 GiB | ~68 GB | 20 layers with Q5_0 downs |
+| UD-IQ4_XS-v31 | 93.7 GB | 56.2 GiB | ~72 GB | 33 layers with Q5_0 downs; its own catalog name, because its Hub files are named UD-IQ4_XS |
+
+The five files that were already offered (UD-IQ4_XS, UD-Q4_K_XL, UD-Q5_K_XL, UD-Q6_K_XL, Q8_0) stay pinned at the
+previous commit, and UD-Q4_K_XL's second (four-shard, n-gram table last) layout at the new commit is accepted from
+files already on disk. UD-IQ1_S stays refused: it mixes two expert formats in one layer.
+
+Engine work this needed: the Q5_0 expert dot product. Its -16 per-weight offset was applied to the sum of the original
+activations (llama.cpp's CUDA form), so a layer whose down projection is Q5_0 came out 2-3% less accurate per expert
+than any other down format. It now multiplies the quantized activation sum, like the Q5_1 and Q4_0 paths and ggml-cpu
+(CUDA and SYCL). Measured on this box with the synthetic expert parity (`native_expert_parity --synthetic`, IQ2_XXS /
+IQ2_S / IQ2_XS / IQ3_XXS / IQ4_XS gate-up with Q5_0 downs, relative L1 error against a float reference): **2.40e-2 ..
+3.18e-2 before, 1.25e-2 .. 1.30e-2 after**, the same as IQ4_NL and Q2_0 downs (1.29e-2 .. 1.31e-2) on the same seeds.
+The grouped-expert launches stay bitwise equal to the pre-window launches (`native_grouped_parity`: Q5_0 added to every
+gate/up format, and the Flash-Next shapes that these files use, 0 failures). Engine version: 0.1.45.7; setup refuses an
+older engine for these seven sets before downloading anything.
+
+The five pinned files, their bytes and every other format are unchanged: only Q5_0 *expert* weights read this kernel
+(the dense Q5_0 path is `native_mmvq`, untouched), and their whole-expert error against the float reference moves from
+2.4-3.2e-2 to 1.25-1.30e-2.
+
 ## Selected upstream v0.2.11 performance ports — 5 November 2026
 
 This update selectively ports upstream optimizations; it is not a full

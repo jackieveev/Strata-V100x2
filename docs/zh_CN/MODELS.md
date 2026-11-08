@@ -23,7 +23,7 @@ RAM 的 PC 属于 40 GB 档（32 + 12 = 44）。
 | **40 GB** | **Swift 1.5** IQ2_XS（39.2 GB） | Gyro-M（35 GB）是另一个选择：质量接近 IQ3_XXS，但写答案比 Q2_0 慢 17-21%。Gyro 能在 NVIDIA 和 AMD 显卡上跑，不能在 Intel Arc 或 Mac 上跑 |
 | **48 GB** | **IQ3_XXS**（47.0 GB） | 更慢，更好 |
 | **64 GB** | **IQ3_S**（54.8 GB），原版。Swift 1.5 的 IQ3_S 是同等选择 | 最慢，最好：在已公布的测试上与原版全模型持平 |
-| **96 GB 或更多** | [Unsloth 的 UD-IQ4_XS 到 Q8_0](#unsloths-files-ud-iq4_xs-to-q8_0)，4 到 8 bit | UD-IQ4_XS 从约 80 GB RAM 起就把每个专家层放进 RAM，Q8_0 从约 136 GB 起。直到 192 GB，5-8-bit 的文件都能装进 RAM。setup 在这里仍预选 IQ3_S，Strix Halo 除外 |
+| **96 GB 或更多** | [Unsloth 的 UD-IQ1_M 到 Q8_0](#unsloths-files-ud-iq1_m-to-q8_0)，1 到 8 bit | UD-IQ1_M 从约 48 GB RAM 起就把每个专家层放进 RAM，UD-IQ4_XS 从约 72 GB 起，Q8_0 从约 136 GB 起。直到 192 GB，5-8-bit 的文件都能装进 RAM。setup 在这里仍预选 IQ3_S，Strix Halo 除外 |
 
 内存比某一行所说更少时，Strata 的[低内存模式](#a-big-graphics-card-and-little-ram)会自行启动，模型跑得更慢，显卡小的
 话慢得多。上面的数字是 RAM + VRAM；[装得下吗？](#will-it-fit)只算 RAM，针对那些把专家层留在 RAM 里的规模。
@@ -142,17 +142,31 @@ START-HERE.bat --setup --family swift --model IQ2_XS
 
 <a id="unsloth-ud-iq4_xs"></a><a id="unsloth-ud-q4_k_xl-experimental"></a>
 
-### Unsloth 的文件：UD-IQ4_XS 到 Q8_0
-<a id="unsloths-files-ud-iq4_xs-to-q8_0"></a>
+### Unsloth 的文件：UD-IQ1_M 到 Q8_0
+<a id="unsloths-files-ud-iq1_m-to-q8_0"></a><a id="unsloths-files-ud-iq4_xs-to-q8_0"></a>
 
-setup 菜单里的第四个版本（`--family unsloth`）是同一模型的 **Unsloth 量化版**，约 4 到 8 bit。它们用比上面 2-3-bit 各规
+setup 菜单里的第四个版本（`--family unsloth`）是同一模型的 **Unsloth 量化版**，约 1 到 8 bit。它们用比上面 2-3-bit 各规
 模更多的 bit 保留原版的专家层，所以需要更多 RAM。专家层加另外 16 GB 装得下时，setup 把每个专家层都放进 RAM（最快的
 方式）；RAM 更少时它放进尽可能多的专家层，其余的在回答期间从 SSD 读（慢得多），而对更大的文件会先问一声。图片默认
 开启（显卡内存小于 24 GB 用 CPU 读取器，从 24 GB 起用显卡的读取器）。
 
+七个 v3.1 文件是 Unsloth 的 **Dynamic v3.1** 修订版（2026-11-04，同一仓库的更新提交）：它们在 4 bit 以下多保留一些专家
+层，格式与上面 2-3-bit 各包相同（i-quant 和 Q2_0）。其中四个（UD-IQ2_XS、UD-Q2_K_XL、UD-Q3_K_XL 和 UD-IQ4_XS-v31）
+在 48 层中的 1 到 33 层里把 Q5_0 专家权重放进 down 投影，这些需要 **引擎 0.1.45.7** 或更新：那个版本修正了 Q5_0 专家
+点积（-16 的偏移改为乘量化后的激活和，与其他格式一致），每个专家相对浮点参考的近 2-3%。setup 会在下载任何东西之前
+停下并说明所需的版本。它们的质量和速度由 Unsloth 公布，本仓库没有测量；UD-IQ1_M 和任何 1-bit 文件一样，在需要仔细
+或长文的活上最弱。
+
 | 规模 | 下载 | 专家层 | 全部放进 RAM 所需 RAM | 与 Q8_0 相同的 top token | AMD R9700（32 GB）：故事 / 代码 / 32K 提示词 |
 | --- | ---: | ---: | ---: | ---: | --- |
-| **UD-IQ4_XS**（setup 的第一个） | 94 GB | 55 GiB | ~72 GB | 88.9% | - |
+| **UD-IQ1_M**（v3.1 各规模） | 68 GB | 32 GiB | ~48 GB | - | - |
+| **UD-Q2_0** | 71 GB | 35 GiB | ~51 GB | - | - |
+| **UD-IQ2_XS** | 76 GB | 39 GiB | ~55 GB | - | - |
+| **UD-Q2_K_XL** | 80 GB | 43 GiB | ~59 GB | - | - |
+| **UD-IQ3_XXS** | 84 GB | 47 GiB | ~63 GB | - | - |
+| **UD-Q3_K_XL** | 90 GB | 52 GiB | ~68 GB | - | - |
+| **UD-IQ4_XS-v31** | 94 GB | 56 GiB | ~72 GB | - | - |
+| **UD-IQ4_XS**（较早的布局） | 94 GB | 55 GiB | ~72 GB | 88.9% | - |
 | **UD-Q4_K_XL** | 111 GB | 72 GiB | ~88 GB | 93.1% | 63 / 87 tok/s / 1,110-1,320 tok/s |
 | **UD-Q5_K_XL** | 158 GB | 92 GiB | ~108 GB | 94.6% | 57-60 / 82 / 810-1,260 |
 | **UD-Q6_K_XL** | 169 GB | 102 GiB | ~118 GB | 94.6% | 54 / 76 / 1,020 |

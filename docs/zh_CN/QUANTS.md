@@ -29,6 +29,32 @@ key/value 以及 token embedding 都是 Q8_0（小向量、norm 和 router 为 F
 UD-Q5_K_XL、UD-Q6_K_XL 和 Q8_0 的分片 2（输出头）和分片 3（PLE 表）逐字节相同（SHA-256 一致），
 所以已经有其中一个的 PC 可以直接链接这两个分片，不必重新下载。
 
+### Unsloth 的 Dynamic v3.1 各规模（#95）
+
+同一仓库在 2026-11-04（提交 `d9620119`，"Dynamic v3.1"）重新发布了这七个文件。它们在 4 bit 以下用上面 2-3-bit 各包
+相同的 i-quant 和 Q2_0 格式存放路由专家层，其中四个在一些层的 down 投影里放了 Q5_0 权重：
+
+| 文件 | 下载大小 | 路由 gate / up（层数） | 路由 down（层数） | 路由专家层 | 每个 token（10 个专家层 x 48 层） |
+|---|---:|---|---|---:|---:|
+| UD-IQ1_M | 68.0 GB | IQ2_XXS 23 层、IQ2_S 18 层、IQ2_XS 7 层 | Q2_0 46 层、IQ4_NL 2 层 | 32.4 GiB | 0.68 GB |
+| UD-Q2_0 | 70.5 GB | IQ2_XXS 18 层、IQ2_S 30 层 | Q2_0 39 层、IQ4_NL 9 层 | 34.8 GiB | 0.73 GB |
+| UD-IQ2_XS | 75.8 GB | IQ2_XXS 8 层、IQ2_S 40 层 | IQ4_NL 24 层、Q2_0 23 层、Q5_0 1 层 | 39.4 GiB | 0.83 GB |
+| UD-Q2_K_XL | 79.6 GB | IQ2_XXS 5 层、IQ2_S 26 层、IQ3_XXS 17 层 | IQ4_NL 31 层、Q2_0 16 层、Q5_0 1 层 | 42.8 GiB | 0.90 GB |
+| UD-IQ3_XXS | 83.6 GB | IQ2_S 26 层、IQ3_XXS 21 层、IQ4_XS 1 层 | IQ4_NL 45 层、Q2_0 3 层 | 46.8 GiB | 0.98 GB |
+| UD-Q3_K_XL | 89.5 GB | IQ2_S 4 层、IQ3_XXS 38 层、IQ4_XS 6 层 | IQ4_NL 26 层、Q5_0 20 层、Q2_0 2 层 | 52.3 GiB | 1.10 GB |
+| UD-IQ4_XS（v3.1 布局） | 93.7 GB | IQ2_S 3 层、IQ3_XXS 28 层、IQ4_XS 17 层 | Q5_0 33 层、IQ4_NL 13 层、Q2_0 2 层 | 56.2 GiB | 1.18 GB |
+
+稠密部分比上面五个文件差别更大：attention 是 Q6_K（UD-IQ1_M 和 UD-Q2_0 的 qkv 投影是 Q5_K，UD-IQ2_XS 和 UD-Q2_K_XL
+是 Q8_0），共享专家层在 4 bit 以下为 Q8_0、之上为 Q6_K，SSM 为 Q8_0（UD-IQ3_XXS 为 Q6_K），token embedding 为 IQ4_XS
+（UD-IQ3_XXS 为 Q6_K），输出头为 Q6_K/Q8_0，PLE 表在每一个里都是 IQ4_NL（26.8 GiB），所以 verify 窗口读的稠密部分
+同样约为 4.8 GB。
+
+Q5_0 的 down 需要引擎 0.1.45.7 或更新：那个版本把该格式的 -16 每权重偏移乘在量化后的激活和上，和 Q5_1、Q4_0 路径
+以及 ggml-cpu 一样，而不是乘在原激活的和上。用合成的专家对比测试（`native_expert_parity --synthetic`）测量，整个
+专家相对浮点参考的误差从 2.1-3.1e-2 降到 1.2e-2，与其他 down 格式相同，GPU 也随之与 CPU 路径一致。在那个版本之前，
+带 Q5_0 down 的层照样回答，只是每个专家低 2-3% 的精度。另外三个 v3.1 规模（UD-IQ1_M、UD-Q2_0、UD-IQ3_XXS）没有
+Q5_0，在它之前就能跑。
+
 ## 每种格式与后端的内核
 <a id="kernels-per-format-and-backend"></a>
 

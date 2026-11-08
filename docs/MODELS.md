@@ -22,7 +22,7 @@ other size stays a choice. A PC with a card of 12 GB and 32 GB of RAM is in the 
 | **40 GB** | **Swift 1.5** IQ2_XS (39.2 GB) | Gyro-M (35 GB) is the other choice: close to IQ3_XXS in quality, but it writes answers 17-21% slower than Q2_0. Gyro runs on NVIDIA and AMD cards, not on Intel Arc or the Mac |
 | **48 GB** | **IQ3_XXS** (47.0 GB) | Slower, better |
 | **64 GB** | **IQ3_S** (54.8 GB), the original. Swift 1.5's IQ3_S is an equal choice | The slowest, the best: it matches the full model on the published tests |
-| **96 GB or more** | [Unsloth's UD-IQ4_XS to Q8_0](#unsloths-files-ud-iq4_xs-to-q8_0), 4 to 8 bit | UD-IQ4_XS keeps every expert in RAM from about 80 GB of RAM, Q8_0 from about 136 GB. Up to 192 GB, the 5-8-bit files fit in RAM. Setup still pre-selects IQ3_S here, except on a Strix Halo |
+| **96 GB or more** | [Unsloth's UD-IQ1_M to Q8_0](#unsloths-files-ud-iq1_m-to-q8_0), 1 to 8 bit | UD-IQ1_M keeps every expert in RAM from about 48 GB of RAM, UD-IQ4_XS from about 72 GB, Q8_0 from about 136 GB. Up to 192 GB, the 5-8-bit files fit in RAM. Setup still pre-selects IQ3_S here, except on a Strix Halo |
 
 With less memory than a row says, Strata's [low-RAM mode](#a-big-graphics-card-and-little-ram) starts by itself and the
 model runs slower, much slower with a small card. The figures above are RAM + VRAM; [Will it fit?](#will-it-fit) counts
@@ -142,18 +142,35 @@ START-HERE.bat --setup --family swift --model IQ2_XS
 ```
 
 <a id="unsloth-ud-iq4_xs"></a><a id="unsloth-ud-q4_k_xl-experimental"></a>
+<a id="unsloths-files-ud-iq1_m-to-q8_0"></a>
 
-### Unsloth's files: UD-IQ4_XS to Q8_0
+### Unsloth's files: UD-IQ1_M to Q8_0
 
-The fourth version in setup's menu (`--family unsloth`) is **Unsloth's quantizations** of the same model, from ~4 to 8
+The fourth version in setup's menu (`--family unsloth`) is **Unsloth's quantizations** of the same model, from ~1 to 8
 bits. They keep the original's experts at more bits than the 2-3-bit sizes above, so they need more RAM. Setup keeps
 every expert in RAM where they and 16 GB more fit (the fastest way); with less RAM it keeps as many as fit and reads
 the rest from the SSD while it answers (much slower), and for the bigger files it asks first. Pictures are on by default
 (the CPU reader under 24 GB of graphics memory, the card's reader from 24 GB).
 
+The seven v3.1 files are Unsloth's **Dynamic v3.1** revision (2026-11-04, a newer commit of the same repository): they
+store more of the experts below 4 bits, in the same i-quant and Q2_0 formats as the 2-3-bit packs above. Four of them
+(UD-IQ2_XS, UD-Q2_K_XL, UD-Q3_K_XL and UD-IQ4_XS-v31) put Q5_0 expert weights in the down projection of 1 to 33 of
+their 48 layers, and those need **engine 0.1.45.7** or newer: that build corrects the Q5_0 expert dot product (its -16
+per-weight offset is applied to the quantized activation sum, as the other formats do, which is 2-3% closer to a float
+reference per expert than before). Setup stops with the version it needs before downloading anything. Their quality
+and speed are Unsloth's to report and have not been measured here; UD-IQ1_M is the weakest on careful or long work, as
+any 1-bit file is.
+
 | Size | Download | Experts | RAM for all of them in RAM | Same top token as Q8_0 | AMD R9700 (32 GB): story / code / 32K prompt |
 | --- | ---: | ---: | ---: | ---: | --- |
-| **UD-IQ4_XS** (setup's first) | 94 GB | 55 GiB | ~72 GB | 88.9% | - |
+| **UD-IQ1_M** (the v3.1 sets) | 68 GB | 32 GiB | ~48 GB | - | - |
+| **UD-Q2_0** | 71 GB | 35 GiB | ~51 GB | - | - |
+| **UD-IQ2_XS** | 76 GB | 39 GiB | ~55 GB | - | - |
+| **UD-Q2_K_XL** | 80 GB | 43 GiB | ~59 GB | - | - |
+| **UD-IQ3_XXS** | 84 GB | 47 GiB | ~63 GB | - | - |
+| **UD-Q3_K_XL** | 90 GB | 52 GiB | ~68 GB | - | - |
+| **UD-IQ4_XS-v31** | 94 GB | 56 GiB | ~72 GB | - | - |
+| **UD-IQ4_XS** (the earlier layout) | 94 GB | 55 GiB | ~72 GB | 88.9% | - |
 | **UD-Q4_K_XL** | 111 GB | 72 GiB | ~88 GB | 93.1% | 63 / 87 tok/s / 1,110-1,320 tok/s |
 | **UD-Q5_K_XL** | 158 GB | 92 GiB | ~108 GB | 94.6% | 57-60 / 82 / 810-1,260 |
 | **UD-Q6_K_XL** | 169 GB | 102 GiB | ~118 GB | 94.6% | 54 / 76 / 1,020 |

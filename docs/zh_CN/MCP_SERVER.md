@@ -119,7 +119,7 @@ tool_timeout_sec = 180                                # strata_stop / strata_ben
 | --- | --- | --- |
 | `strata_status` | 是否有模型在跑：模型、引擎版本、上下文、忙还是闲、占用的显存和 RAM。装了什么：模型、启动脚本、引擎版本、数据文件夹、下载。进行中的一次安装。这台 PC 的硬件：OS、CPU、RAM、显卡、页面文件、空闲磁盘。setup 为这台 PC 推荐的模型和上下文。 | `port`, `hardware` (true/false) |
 | `strata_models` | setup 提供的每个系列和规模，含下载大小、需要的 RAM、是否适合这台 PC、是否已安装。还有各上下文长度和推荐项。 | - |
-| `strata_install` | 在后台不问问题地跑 setup（见下文）。没有 `confirm: true` 时只返回计划。再调一次会显示进度。`cancel: true` 停止安装。 | `family` (qwen, swift, coder, unsloth), `model` (Q2_0, IQ2_XS, IQ3_XXS, IQ3_S, IQ1_M, UD-IQ4_XS, UD-Q4_K_XL), `context` (8192 ... 524288), `vision` (no, yes, gpu, cpu), `kv` (int8, q4_0, k8v4), `gpu` (一个数字) or `gpus` ("0,2", "all"), `backend` (auto, cuda, hip), `low_ram`, `port`, `data_dir`, `confirm`, `cancel` |
+| `strata_install` | 在后台不问问题地跑 setup（见下文）。没有 `confirm: true` 时只返回计划。再调一次会显示进度。`cancel: true` 停止安装。 | `family` (qwen, swift, coder, unsloth), `model` (Q2_0, IQ2_XS, IQ3_XXS, IQ3_S, IQ1_M, UD-IQ4_XS, UD-Q4_K_XL, UD-IQ1_M, UD-Q2_0, UD-IQ2_XS, UD-Q2_K_XL, UD-IQ3_XXS, UD-Q3_K_XL, UD-IQ4_XS-v31), `context` (8192 ... 524288), `vision` (no, yes, gpu, cpu), `kv` (int8, q4_0, k8v4), `gpu` (一个数字) or `gpus` ("0,2", "all"), `backend` (auto, cuda, hip), `low_ram`, `port`, `data_dir`, `confirm`, `cancel` |
 | `strata_start` | 在后台启动一个已安装的模型，并等它应答。如果 `wait_seconds`（默认 50）之后还没就绪，就返回 “loading”。 | `model` (`strata_status` 里的一个 id，例如 `q2_0`、`coder-iq1_m`；默认：最近用过的那个), `port`, `gpu`, `wait_seconds` (0-600) |
 | `strata_stop` | 通过服务器自己的 API 卸载模型，然后结束它启动的那个服务器。 | `port`, `force` |
 | `strata_logs` | 服务器日志、引擎日志或 setup 日志的最后几行。 | `source` (server, engine, setup), `model`, `lines` (1-500) |
