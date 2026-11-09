@@ -228,7 +228,7 @@ Linux:    ./setup.sh --yes --family qwen --model IQ2_XS --vision yes --no-start
 | --- | --- |
 | `--yes` | 对每个问题都采用推荐答案（不提问） |
 | `--family qwen\|swift\|coder\|unsloth` | 模型版本 |
-| `--model Q2_0\|IQ2_XS\|IQ3_XXS\|IQ3_S\|IQ1_M\|UD-IQ4_XS\|UD-Q4_K_XL` | 规模（Coder 是 IQ1_M，Unsloth 是 UD-IQ4_XS 或 UD-Q4_K_XL） |
+| `--model Q2_0\|IQ2_XS\|IQ3_XXS\|IQ3_S\|IQ1_M\|UD-IQ4_XS\|UD-Q4_K_XL\|UD-IQ1_M\|UD-Q2_0\|UD-IQ2_XS\|UD-Q2_K_XL\|UD-IQ3_XXS\|UD-Q3_K_XL\|UD-IQ4_XS-v31` | 规模（Coder 是 IQ1_M，Unsloth 是 UD-IQ4_XS、UD-Q4_K_XL 以及从 UD-IQ1_M 到 UD-IQ4_XS-v31 的 v3.1 各规模） |
 | `--context N` | 上下文长度（token 数）；按显存决定默认值：14 GB 以下 32768，20 GB 以下 65536，否则 131072 |
 | `--vision yes\|no\|gpu\|cpu` | 读取图片。传 `yes` 会为显卡选择最合适的读取器（24 GB 以下用 CPU，24 GB 及以上用 GPU，任何品牌都一样）；`no` 关闭 |
 | `--gpu N` / `--gpus 0,1` / `--gpus all` | 一张显卡，或共享该模型的多张（默认：显存最大的那张） |

@@ -27,6 +27,34 @@ window is about 4.8 GB in every file.
 UD-Q5_K_XL, UD-Q6_K_XL and Q8_0 share their shards 2 (the output head) and 3 (the PLE table) byte for byte (the same
 SHA-256), so a PC that has one of them can link those two shards instead of downloading them again.
 
+### Unsloth's Dynamic v3.1 sets (#95)
+
+The same repository republished these seven files on 2026-11-04 (commit `d9620119`, "Dynamic v3.1"). They store the
+routed experts below 4 bits with the i-quant and Q2_0 formats the 2-3-bit packs above use, and four of them put Q5_0
+weights in the down projection of some layers:
+
+| File | Download | Routed gate / up (layers) | Routed down (layers) | Routed experts | Per token (10 experts x 48 layers) |
+|---|---:|---|---|---:|---:|
+| UD-IQ1_M | 68.0 GB | IQ2_XXS 23, IQ2_S 18, IQ2_XS 7 | Q2_0 46, IQ4_NL 2 | 32.4 GiB | 0.68 GB |
+| UD-Q2_0 | 70.5 GB | IQ2_XXS 18, IQ2_S 30 | Q2_0 39, IQ4_NL 9 | 34.8 GiB | 0.73 GB |
+| UD-IQ2_XS | 75.8 GB | IQ2_XXS 8, IQ2_S 40 | IQ4_NL 24, Q2_0 23, Q5_0 1 | 39.4 GiB | 0.83 GB |
+| UD-Q2_K_XL | 79.6 GB | IQ2_XXS 5, IQ2_S 26, IQ3_XXS 17 | IQ4_NL 31, Q2_0 16, Q5_0 1 | 42.8 GiB | 0.90 GB |
+| UD-IQ3_XXS | 83.6 GB | IQ2_S 26, IQ3_XXS 21, IQ4_XS 1 | IQ4_NL 45, Q2_0 3 | 46.8 GiB | 0.98 GB |
+| UD-Q3_K_XL | 89.5 GB | IQ2_S 4, IQ3_XXS 38, IQ4_XS 6 | IQ4_NL 26, Q5_0 20, Q2_0 2 | 52.3 GiB | 1.10 GB |
+| UD-IQ4_XS (the v3.1 layout) | 93.7 GB | IQ2_S 3, IQ3_XXS 28, IQ4_XS 17 | Q5_0 33, IQ4_NL 13, Q2_0 2 | 56.2 GiB | 1.18 GB |
+
+The dense side differs more than in the five files above: the attention is Q6_K (the qkv projection Q5_K in UD-IQ1_M
+and UD-Q2_0, Q8_0 in UD-IQ2_XS and UD-Q2_K_XL), the shared expert is Q8_0 below 4-bit and Q6_K above it, the SSM is
+Q8_0 (Q6_K in UD-IQ3_XXS), the token embedding is IQ4_XS (Q6_K in UD-IQ3_XXS), the output head Q6_K/Q8_0 and the
+PLE table IQ4_NL (26.8 GiB) in every one of them, so the dense side a verify window reads is about 4.8 GB again.
+
+The Q5_0 down needs engine 0.1.45.7 or newer: that build applies the format's -16 per-weight offset to the quantized
+activation sum, as the Q5_1 and Q4_0 paths and ggml-cpu do, instead of to the sum of the original activations. Measured
+with the synthetic expert parity (`native_expert_parity --synthetic`), the whole-expert error against a float reference
+drops from 2.1-3.1e-2 to 1.2e-2, the same as every other down format, and the GPU then agrees with the CPU path.
+Before that build the layers with Q5_0 downs answer, but 2-3% less accurately per expert. The other three v3.1 sets
+(UD-IQ1_M, UD-Q2_0, UD-IQ3_XXS) have no Q5_0 and ran before it.
+
 ## Kernels per format and backend
 
 | Format (role) | CUDA decode (grouped experts) | CUDA prompt | CPU pool | AMD (HIP) decode | AMD prompt | Intel (SYCL) decode | Intel prompt |

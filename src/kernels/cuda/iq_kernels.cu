@@ -433,13 +433,18 @@ __device__ __forceinline__ float vec_dot_q5_K_q8_1(const void* __restrict__ vbq,
 // of the ORIGINAL activations.  That is ggml-cpu's convention (its q8_1 `s` is d * sum(q)) and the one the K-quant
 // mins above use; the scaled and the min term then see the same activation (eddoursul/Strata measured 1.1-1.2%
 // against 1.9% relative error per expert).  Result: sumi * (d5 * d8) + sumu * (m5 * d8).
-// Q5_0: llama.cpp's integer chain verbatim (vecdotq.cuh vec_dot_q5_0_q8_1_impl) -- symmetric (one delta, no
-// learned min), so unlike Q5_1 there is no min-term rounding choice to make: the constant -16 per-weight offset
-// is accounted for via the q8_1 block's `ds.y` (sum of the ORIGINAL activations), exactly as upstream.
+// Q5_0: llama.cpp's integer chain (vecdotq.cuh vec_dot_q5_0_q8_1_impl), but the constant -16 per-weight offset multiplies
+// the sum of the QUANTIZED activations (dp4a with 0x01010101, times d8), like the Q5_1 and Q4_0 paths and ggml-cpu's q8_0
+// dot, instead of the q8_1 block's `ds.y` (the sum of the ORIGINAL activations, upstream CUDA).  Unsloth's v3.1 sets put
+// Q5_0 downs in 1 to 33 layers (#95), and the original sum does not see the activations' rounding, which the experts'
+// SwiGLU outputs (not zero-mean) make large: measured on the V100 pair with native_expert_parity --synthetic (IQ2_XXS,
+// IQ2_S, IQ2_XS, IQ3_XXS and IQ4_XS gate/up), the whole-expert error against a float reference was 2.40e-2 .. 3.18e-2
+// with the old form and 1.25e-2 .. 1.30e-2 now, the range of the other down formats there (IQ4_NL/Q2_0: 1.29e-2 ..
+// 1.31e-2).  Result: d5 * d8 * (sumi - 16 * sumu).
 __device__ __forceinline__ float vec_dot_q5_0_q8_1(const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
                                                    const int& kbx, const int& iqs) {
     const block_q5_0* bq5_0 = (const block_q5_0*) vbq + kbx;
-    int sumi = 0;
+    int sumi = 0, sumu = 0;
 #pragma unroll
     for (int i = 0; i < VDR_Q5_0; ++i) {
         const int vl = get_int_b2(bq5_0->qs, iqs + i);
@@ -457,11 +462,11 @@ __device__ __forceinline__ float vec_dot_q5_0_q8_1(const void* __restrict__ vbq,
         vi1 |= (vh << 2) & 0x00100000;
         vi1 |= (vh << 9) & 0x10000000;
         sumi = ggml_cuda_dp4a(vi1, u1, sumi);
+        sumu = ggml_cuda_dp4a(0x01010101, u1, ggml_cuda_dp4a(0x01010101, u0, sumu));
     }
     const float d5 = __half2float(bq5_0->d);
     const float d8 = __low2float(bq8_1->ds);
-    const float s8 = __high2float(bq8_1->ds);
-    return d5 * (sumi * d8 - (16.0f * VDR_Q5_0 / QI5_0) * s8);
+    return d5 * d8 * (float) (sumi - 16 * sumu);
 }
 // Q4_0 (plain llama-quantize Q4_0 files, e.g. bartowski's: gate/up and most down projections): the codes are centred
 // (q - 8 as signed bytes) before the dot, the exact integer form ggml-cpu's q4_0 x q8_0 dot uses, rather than

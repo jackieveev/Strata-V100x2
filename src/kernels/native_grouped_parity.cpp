@@ -63,10 +63,11 @@ const char* name_of(int t) {
         case 14: return "Q6_K";
         case 7: return "Q5_1";
         case 8: return "Q8_0";
+        case 6: return "Q5_0";
         default: return "?";
     }
 }
-int block_values(int t) { return t == 20 || t == 7 || t == 8 ? 32 : t == 42 ? 64 : 256; }
+int block_values(int t) { return t == 20 || t == 7 || t == 8 || t == 6 ? 32 : t == 42 ? 64 : 256; }   // (6 = Q5_0: 32-value blocks, each needs its own finite scale)
 
 // `rows` rows of `n` values of format t: random bytes, then a finite fp16 scale in every block
 std::vector<uint8_t> random_rows(int t, int64_t rows, int64_t n, std::mt19937& rng) {
@@ -358,10 +359,12 @@ int main(int argc, char** argv) {
                    14,
 #endif
                    8})        // STRATA_GU_FMTS
-        for (int dt : {20, 23, 42, 7, 8}) check(gu, dt, 512, 256, s, rng);   // STRATA_D_FMTS; IQ4_XS: n_ff % 256
+        for (int dt : {20, 23, 42, 7, 8, 6}) check(gu, dt, 512, 256, s, rng);   // STRATA_D_FMTS; IQ4_XS: n_ff % 256
     check(42, 42, 2560, 640, s, rng);
     check(21, 20, 2560, 640, s, rng);                                   // a model's shapes
     check(21, 23, 2560, 768, s, rng);
+    // Unsloth's v3.1 sets (#95): IQ2_XXS / IQ2_S / IQ3_XXS / IQ4_XS gate/up with Q5_0 downs, at Flash-Next's shape
+    for (int gu : {16, 22, 18, 23}) check(gu, 6, 2560, 640, s, rng);
     if (do_bench) bench(s, rng);
     std::printf("native_grouped_parity: %d failures\n", g_fail);
     cudaStreamDestroy(s);
