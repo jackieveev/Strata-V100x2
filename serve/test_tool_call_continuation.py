@@ -125,7 +125,7 @@ class ToolCallContinuation(unittest.TestCase):
             for choice in ('auto', 'none'):
                 with self.subTest(stream=stream, choice=choice):
                     tok = ByteTokenizer()
-                    engine = RecordingEngine(tok, ['Thought.</think>\n' + SCREENSHOT_PREAMBLE, 'bash>\n' + ARGUMENTS])
+                    engine = RecordingEngine(tok, ['Thought.</think>\n' + SCREENSHOT_PREAMBLE, '<function=bash>\n' + ARGUMENTS])
                     svc = Service(engine, tok, ChatTemplate(ROOT / 'serve/chat_template.jinja'))
                     svc.tool_call_continuation = True
                     httpd = serve(svc, port=0)
