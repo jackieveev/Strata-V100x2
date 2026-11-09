@@ -1450,11 +1450,12 @@ print(r.choices[0].message.content)
   `max_tokens` (the rest of the context) get a budget of three quarters of it. `"answer_room": false` in
   `strata-<model>.json` turns it off. Qwen recommends up to 262,144 tokens of reasoning and 131,072 of answer: a client
   should not cap the reply far below what the context allows.
-- **Past thinking is not part of the next prompt by default.** The server removes
-  historical `reasoning_content`, including in tool-call history. It still generates
-  and streams thinking for the current reply. To include supplied historical
-  reasoning, set `"chat_template_kwargs": {"preserve_thinking": true}`. This is an
-  explicit request option, not the default.
+- **Thinking before the last user message is not part of the next prompt by default.**
+  The chat template's own rule applies: assistant turns before the last user query
+  render their answer only, and every turn of the running tool loop after it keeps
+  the `reasoning_content` (or Anthropic `thinking` block) the client sent back, so an
+  agent reads its own plan between tool calls. To include all supplied historical
+  reasoning, set `"chat_template_kwargs": {"preserve_thinking": true}`.
 - **A reply that ends inside its thinking (#1053, opt-in).** Some turns write a sentence of reasoning and then the
   end-of-turn token with no `</think>`: the content is empty and an agent stops. `"reasoning_close_retry": true` in
   `strata-<model>.json` closes the thinking once (as the thinking budget does) and continues, once per request, only for
@@ -1712,9 +1713,11 @@ It still starts from a checkpoint it matches, and still saves the system-prompt 
 thinking. The generated GPU state then differs from the next prompt. That state
 cannot be reused as if the thinking were absent.
 
-After a complete reply, a serial server prepares the exact answer-only history
-with a decode-free idle prefill. It includes completed tool calls and the original
-image embeddings. It does not store hidden thinking in the next prompt or generate
+After a complete final answer, a serial server prepares the exact answer-only
+history with a decode-free idle prefill, including the original image embeddings.
+A tool-call reply is not prepared: the running tool loop keeps its thinking, so
+the engine's held state already starts the next prompt of a client that sends the
+thinking back. It does not store hidden thinking in the next prompt or generate
 an extra token. A following request reuses the prepared prefix only if its tokens,
 images, and control-vector mode match. The server encodes the prefix with the same
 rules as the request, so a control token inside a message stays text.

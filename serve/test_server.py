@@ -5350,8 +5350,8 @@ class WarmEngine(MockEngine):
 
 
 class ThinkingHistory(unittest.TestCase):
-    """Historical thinking is left out of the prompt by default (a client that drops it would otherwise never match
-    the engine's held state); the reply being generated still thinks, and a request can ask for it back."""
+    """The template's rule by default: thinking before the last user query is left out, the running tool loop keeps
+    the thinking the client sent back; the reply being generated still thinks, and a request can ask for it all."""
 
     OPEN = "\x3cthink\x3e"
     CLOSE = "\x3c/think\x3e"
@@ -5389,6 +5389,33 @@ class ThinkingHistory(unittest.TestCase):
         text = self.text(msgs, [{"name": "f", "parameters": {}}])
         self.assertNotIn("SECRET-THOUGHT", text)
         self.assertIn("again", text)
+
+    def test_the_running_tool_loop_keeps_its_thinking(self):
+        # no user query after the call: the loop is still running, and the model reads its own plan back
+        msgs = [{"role": "user", "content": "old"},
+                {"role": "assistant", "content": "a0", "reasoning_content": "OLD-THOUGHT"},
+                {"role": "user", "content": "go"},
+                {"role": "assistant", "content": "", "reasoning_content": "PLAN-STEP-1",
+                 "tool_calls": [{"function": {"name": "f", "arguments": {"a": 1}}}]},
+                {"role": "tool", "content": "res1"},
+                {"role": "assistant", "content": "", "reasoning_content": "PLAN-STEP-2",
+                 "tool_calls": [{"function": {"name": "f", "arguments": {"a": 2}}}]},
+                {"role": "tool", "content": "res2"}]
+        text = self.text(msgs, [{"name": "f", "parameters": {}}])
+        self.assertNotIn("OLD-THOUGHT", text)
+        self.assertIn(self.OPEN + "\nPLAN-STEP-1\n", text)
+        self.assertIn(self.OPEN + "\nPLAN-STEP-2\n", text)
+
+    def test_an_anthropic_tool_loop_keeps_its_thinking_blocks(self):
+        req = {"messages": [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": [{"type": "thinking", "thinking": "PLAN-STEP-1", "signature": "s"},
+                                              {"type": "tool_use", "id": "t1", "name": "f", "input": {"a": 1}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "res1"}]}],
+            "tools": [{"name": "f", "input_schema": {"type": "object"}}], "max_tokens": 64}
+        from serve.frontend import anthropic_to_messages
+        messages, tools, kw = anthropic_to_messages(req)
+        self.assertIn(self.OPEN + "\nPLAN-STEP-1\n", self.text(messages, tools, **kw))
 
 
 class IdlePrefill(unittest.TestCase):
@@ -5438,37 +5465,28 @@ class IdlePrefill(unittest.TestCase):
         self.assertEqual(real[:len(ids)], ids)
         self.assertGreater(len(ids), 8)
 
-    def test_a_tool_call_warms_the_tool_result_prefix(self):
-        # a thinking reply: its tool call renders with the empty thinking block, so the engine's held state (the real
-        # thinking) diverges from the canonical prefix and the prefix is worth reading ahead
+    def test_a_tool_call_is_not_warmed(self):
+        # the tool loop keeps the reply's thinking in the next prompt: the engine's held state is already its prefix
         self.script("THOUGHT" + "\x3c/think\x3e" + "\n\n\n" + self.TOOL_CALL)
         tools = [{"name": "write", "description": "w", "parameters": {"properties": {"text": {"type": "string"}}}}]
-        messages = [{"role": "user", "content": "go"}]
-        self.chat(messages, tools, enable_thinking=True)
-        ids, _, _ = self.warm()
-        reply = {"role": "assistant", "content": "",
-                 "tool_calls": [{"function": {"name": "write", "arguments": {"text": "hi"}}}]}
-        follow = [*messages, reply, {"role": "tool", "content": "done"}]
-        real = self.svc.encode_prompt(follow, tools, {"enable_thinking": True})
-        self.assertEqual(real[:len(ids)], ids)
+        self.chat([{"role": "user", "content": "go"}], tools, enable_thinking=True)
+        time.sleep(0.1)
+        self.assertEqual(self.engine.prefills, [])
 
     def test_the_next_turn_does_not_cancel_the_completed_turns_prefix(self):
-        """An agentic client sends the next turn as soon as the tool call arrives, with no idle time.  The completed
-        turn's canonical prefix must still be read - the next request's prepare() and run() give way only to a prefill
-        that is not the start of their own prompt - so the next prompt reuses it instead of re-reading the
-        conversation.  The tool call comes back the way the API sends it: its arguments are a JSON string."""
-        tools = [{"name": "write", "description": "w", "parameters": {"properties": {"text": {"type": "string"}}}}]
+        """A client sends the next turn as soon as the answer arrives, with no idle time.  The completed turn's
+        canonical prefix must still be read - the next request's prepare() and run() give way only to a prefill that
+        is not the start of their own prompt - so the next prompt reuses it instead of re-reading the conversation.
+        The client sends the reply's thinking back; the template leaves it out once a user query follows."""
         self.engine.hold = True                      # the read takes time, as on a real engine
-        self.script("THOUGHT" + "\x3c/think\x3e" + "\n\n\n" + self.TOOL_CALL)
-        self.chat([{"role": "user", "content": "go"}], tools, enable_thinking=True)
+        self.script("THOUGHT" + "\x3c/think\x3e" + "\n\n\n" + self.ANSWER)
+        self.chat([{"role": "user", "content": "2+2?"}], enable_thinking=True)
         self.assertTrue(self.engine.prefilled.wait(5))
         warm_ids = self.engine.prefills[-1][0]
         req = {"messages": [
-            {"role": "user", "content": "go"},
-            {"role": "assistant", "content": "", "reasoning_content": "THOUGHT",
-             "tool_calls": [{"type": "function", "function": {"name": "write", "arguments": '{"text": "hi"}'}}]},
-            {"role": "tool", "content": "done"}],
-            "tools": [{"type": "function", "function": t} for t in tools]}
+            {"role": "user", "content": "2+2?"},
+            {"role": "assistant", "content": self.ANSWER, "reasoning_content": "THOUGHT"},
+            {"role": "user", "content": "and 3+3?"}]}
         self.svc.load()                              # every HTTP generation request starts with load()
         self.assertEqual(self.engine.cancelled, 0)   # the loaded engine needs no start, so load() left it alone
         messages, next_tools, kw = openai_to_messages(req)

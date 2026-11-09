@@ -424,18 +424,6 @@ def _late_system_to_user(messages: list[dict]) -> list[dict]:
     return [dict(m, role="user") if m.get("role") == "system" and i > 0 else m for i, m in enumerate(messages)]
 
 
-def strip_reasoning(messages: list[dict]) -> list[dict]:
-    """The messages with every assistant turn's `reasoning_content` left out - a copy only of the messages that had
-    some, so the caller's own objects are never changed.  The template's `preserve_thinking` alone is not enough: an
-    assistant turn after the last user query (a tool loop) renders its thinking block whatever the flag says, so the
-    historical thinking must not be there to render.  The reply being generated is not one of these messages."""
-    if not any(isinstance(m, dict) and "reasoning_content" in m for m in messages):
-        return messages
-    return [({k: v for k, v in m.items() if k != "reasoning_content"}
-             if isinstance(m, dict) and m.get("role") == "assistant" and "reasoning_content" in m else m)
-            for m in messages]
-
-
 def _object_list(value, name: str) -> list[dict]:
     """#460: a request's "messages" (or a message's "tool_calls") as a list of objects.  Some clients send the array
     double-encoded, as a JSON string, which used to be iterated character by character and crashed on m.get: such a

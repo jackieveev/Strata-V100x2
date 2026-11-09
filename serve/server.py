@@ -62,7 +62,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
 from serve.frontend import (THINK_END, ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
                             forced_call, images_of, literal_tags, mark_think_literals, openai_to_messages,
-                            strip_reasoning, tool_choice_of, unmark_think_literals)
+                            tool_choice_of, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
 from strata_control import engine_component  # noqa: E402
@@ -4674,13 +4674,13 @@ class Service:
                         "total_gib": scaled(hw.get("ram_total"), 2 ** 30, 1)} if hw.get("ram_total") else None}}
 
     def _history(self, messages, kwargs):
-        """The template's messages and kwargs for a render: historical thinking is left out unless the request asks
-        for it back (`preserve_thinking` true - the Responses API, which replays what it was given).  The caller's own
-        messages are never changed (a copy only of the assistant turns that carried thinking)."""
+        """The template's messages and kwargs for a render.  Without `preserve_thinking` true (the Responses API sets
+        it) the template's own rule applies: an assistant turn before the last user query renders its answer only,
+        and every turn of the running tool loop after it keeps the thinking the client sent back, as the model was
+        trained to read it."""
         kwargs = dict(kwargs)
         if kwargs.get("preserve_thinking") is not True:
             kwargs["preserve_thinking"] = False
-            messages = strip_reasoning(messages)
         return messages, kwargs
 
     def render_prompt(self, messages, tools, kwargs) -> str:
@@ -5160,14 +5160,12 @@ class Service:
             self._warm_drop(job)
 
     def _warm_ids(self, ctx, reply) -> list[int]:
-        """The tokens the next request's prompt will start with: this request's history plus the reply as the client
-        will send it back (its content and completed tool calls, no reasoning), rendered with the turn that will
-        follow it and then cut back to the end of the reply's turn.  The dummy turn matters: the template formats a
-        trailing assistant turn differently after a future user than after a future tool result, so appending the
-        role that will really follow makes the reply render the way it will once the client's next message is there."""
+        """The tokens the next request's prompt will start with: this request's history plus the final answer,
+        rendered with the user turn that will follow it and then cut back to the end of the answer's turn.  The dummy
+        user turn matters: it makes every assistant turn of this request historical, so the template renders them
+        answer-only, as it will once the client's next message is there."""
         messages = list(ctx["messages"]) + [reply]
-        dummy = {"role": "tool", "content": "\u0000warm"} if reply.get("tool_calls") else \
-            {"role": "user", "content": "\u0000warm"}
+        dummy = {"role": "user", "content": "\u0000warm"}
         marked, marked_tools, changed = mark_think_literals(messages + [dummy], ctx["tools"], self.literals)
         prompt = self.render_history(marked, marked_tools, ctx["kwargs"])
         prompt = prompt[:prompt.rindex("<|im_start|>")]      # the dummy turn is the last one: drop it entirely
@@ -5186,13 +5184,14 @@ class Service:
     def _schedule_warm(self, ctx, ids, held, answer, calls, truncated, finish, cancel, sampling, emb) -> bool:
         """Hand the idle prefill the canonical next-turn prefix for this reply, or do nothing.  -> whether it took the
         request's image embeddings file (the worker unlinks it then, this request must not).  Only a completed, clean
-        answer is warmed: no cancel, disconnect, error, or tool call the output ended inside.  Called under the FIFO."""
+        final answer is warmed: no cancel, disconnect or error.  A tool-call reply stays in the running tool loop, where
+        the template renders the thinking the client sends back: the engine's held state is already that prefix for a
+        client that returns its thinking, and a client that drops it re-reads only the short call.  Called under the
+        FIFO."""
         if ctx is None or ctx["kwargs"].get("preserve_thinking") is True or finish != "stop" \
-                or cancel.is_set() or truncated or (not answer and not calls):
-            return False                                 # a client that keeps its thinking already matches the engine
+                or cancel.is_set() or truncated or calls or not answer:
+            return False
         reply = {"role": "assistant", "content": "".join(answer)}
-        if calls:
-            reply["tool_calls"] = [{"function": {"name": c.name, "arguments": c.arguments}} for c in calls]
         try:
             canonical = self._warm_ids(ctx, reply)
         except (ValueError, KeyError, TypeError) as e:       # a template or a count this cannot take apart

@@ -1679,10 +1679,10 @@ print(r.choices[0].message.content)
 
 <a id="max-tokens-counts-the-thinking"></a>
 
-- **默认情况下过去的 thinking 不是下一个 prompt 的一部分。** 服务器移除历史
-  `reasoning_content`，包括工具调用历史里的。它仍为当前回复生成并流式 thinking。要包含所提供的
-  历史 reasoning，设 `"chat_template_kwargs": {"preserve_thinking": true}`。这是一个显式的请求
-  选项，不是默认。
+- **默认情况下，最后一条用户消息之前的 thinking 不是下一个 prompt 的一部分。** 采用聊天模板自己的
+  规则：最后一条用户 query 之前的 assistant 轮次只渲染答案，之后正在进行的工具循环中的每一轮保留客户端
+  回传的 `reasoning_content`（或 Anthropic `thinking` 块），让 agent 在工具调用之间读到自己的计划。要包含
+  所有历史 reasoning，设 `"chat_template_kwargs": {"preserve_thinking": true}`。
 
 <a id="past-thinking-is-not-part-of-the-next-prompt"></a>
 
